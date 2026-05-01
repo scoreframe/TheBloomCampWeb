@@ -293,33 +293,83 @@ function sizeCanvas() {
 function setupChartInteraction() {
     const canvas = document.getElementById('chart');
     if (!canvas) return;
-    let dragging = false, lastX = 0, lastY = 0, pinchStartDist = 0, pinchStartScale = 1;
+    // Track all active pointers so we can detect a 2-finger pinch. With
+    // setPointerCapture you can only capture one pointer per element, so for
+    // multi-touch we just track manually and accept that lifting outside the
+    // canvas may miss a release (rare).
+    const pointers = new Map();   // pointerId -> {x, y}
+    let pinchStartDist = 0;
+    let pinchStartScale = 1;
+    let pinchCenter = null;       // {x, y} relative to canvas
+    let downX = 0, downY = 0;     // for click vs drag detection
+    let movedSinceDown = false;
+
+    function applyZoom(newScale, centerX, centerY) {
+        newScale = Math.max(0.3, Math.min(3, newScale));
+        if (newScale === state.scale) return;
+        state.panX = centerX - (centerX - state.panX) * (newScale / state.scale);
+        state.panY = centerY - (centerY - state.panY) * (newScale / state.scale);
+        state.scale = newScale;
+        state.userInteracted = true;
+    }
 
     canvas.addEventListener('pointerdown', (e) => {
-        if (e.pointerType === 'touch' || e.button === 0) {
-            dragging = true; lastX = e.clientX; lastY = e.clientY;
-            canvas.setPointerCapture(e.pointerId);
+        pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+        downX = e.clientX; downY = e.clientY; movedSinceDown = false;
+        if (pointers.size === 2) {
+            // Pinch begins.
+            const pts = [...pointers.values()];
+            pinchStartDist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y) || 1;
+            pinchStartScale = state.scale;
+            const rect = canvas.getBoundingClientRect();
+            pinchCenter = {
+                x: (pts[0].x + pts[1].x) / 2 - rect.left,
+                y: (pts[0].y + pts[1].y) / 2 - rect.top,
+            };
+        } else if (pointers.size === 1) {
+            // Capture so we don't lose the pointer if it leaves the canvas
+            // mid-drag. Skip for multi-touch (capture is single-pointer only).
+            try { canvas.setPointerCapture(e.pointerId); } catch {}
         }
     });
+
     canvas.addEventListener('pointermove', (e) => {
-        if (!dragging) return;
-        const dx = e.clientX - lastX, dy = e.clientY - lastY;
-        lastX = e.clientX; lastY = e.clientY;
-        if (Math.abs(dx) + Math.abs(dy) > 1) {
-            state.userInteracted = true;
-            state.panX += dx; state.panY += dy;
+        if (!pointers.has(e.pointerId)) return;
+        const prev = pointers.get(e.pointerId);
+        pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+        if (pointers.size >= 2 && pinchCenter) {
+            // Pinch zoom — ignore individual pan deltas.
+            const pts = [...pointers.values()];
+            const dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y) || 1;
+            const target = pinchStartScale * (dist / pinchStartDist);
+            applyZoom(target, pinchCenter.x, pinchCenter.y);
+            movedSinceDown = true;
             drawChart();
+        } else if (pointers.size === 1) {
+            // Single-pointer drag = pan.
+            const dx = e.clientX - prev.x, dy = e.clientY - prev.y;
+            if (Math.abs(dx) + Math.abs(dy) > 1) {
+                state.userInteracted = true;
+                state.panX += dx; state.panY += dy;
+                movedSinceDown = true;
+                drawChart();
+            }
         }
     });
-    canvas.addEventListener('pointerup', (e) => {
-        const moved = Math.abs(e.clientX - lastX) + Math.abs(e.clientY - lastY);
-        if (!moved && !state.userInteracted) {
-            // No-op: tap-without-drag handled by click below.
-        }
-        dragging = false;
+
+    function endPointer(e) {
+        if (!pointers.has(e.pointerId)) return;
+        pointers.delete(e.pointerId);
+        if (pointers.size < 2) pinchCenter = null;
         try { canvas.releasePointerCapture(e.pointerId); } catch {}
-    });
+    }
+    canvas.addEventListener('pointerup', endPointer);
+    canvas.addEventListener('pointercancel', endPointer);
+    canvas.addEventListener('lostpointercapture', endPointer);
+
     canvas.addEventListener('click', (e) => {
+        // Suppress click-to-select if the pointer was actually dragging.
+        if (movedSinceDown) return;
         const rect = canvas.getBoundingClientRect();
         const x = (e.clientX - rect.left - state.panX) / state.scale;
         const y = (e.clientY - rect.top - state.panY) / state.scale;
@@ -327,19 +377,36 @@ function setupChartInteraction() {
         if (hit) selectPerson(hit);
         else closeDetail();
     });
+
+    // Mac trackpad pinch + scroll-wheel zoom land here. For trackpad pinch
+    // browsers send wheel events with ctrlKey=true (a quirk Chrome adopted
+    // to support pinch-to-zoom in CSS-zoom-aware contexts).
     canvas.addEventListener('wheel', (e) => {
         e.preventDefault();
-        state.userInteracted = true;
         const rect = canvas.getBoundingClientRect();
         const cx = e.clientX - rect.left, cy = e.clientY - rect.top;
         const factor = Math.exp(-e.deltaY * 0.001);
-        const newScale = Math.max(0.3, Math.min(3, state.scale * factor));
-        // Zoom around the cursor.
-        state.panX = cx - (cx - state.panX) * (newScale / state.scale);
-        state.panY = cy - (cy - state.panY) * (newScale / state.scale);
-        state.scale = newScale;
+        applyZoom(state.scale * factor, cx, cy);
         drawChart();
     }, { passive: false });
+
+    // Safari (desktop + iOS) fires GestureEvent for trackpad/pinch as well.
+    // Cover both bases — without these, Safari users get nothing.
+    let gestureStartScale = 1;
+    let gestureCenter = null;
+    canvas.addEventListener('gesturestart', (e) => {
+        e.preventDefault();
+        gestureStartScale = state.scale;
+        const rect = canvas.getBoundingClientRect();
+        gestureCenter = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    }, { passive: false });
+    canvas.addEventListener('gesturechange', (e) => {
+        e.preventDefault();
+        if (!gestureCenter) return;
+        applyZoom(gestureStartScale * e.scale, gestureCenter.x, gestureCenter.y);
+        drawChart();
+    }, { passive: false });
+    canvas.addEventListener('gestureend', () => { gestureCenter = null; });
 
     window.addEventListener('resize', () => {
         sizeCanvas();
