@@ -148,6 +148,71 @@ header {
     background: var(--separator); border: none; width: 28px; height: 28px;
     border-radius: 14px; cursor: pointer; font-size: 14px;
 }
+
+/* Claim-yourself banner */
+.claim-banner {
+    position: absolute; top: 56px; left: 12px; right: 12px;
+    background: var(--brand-soft); border: 1px solid var(--brand-green);
+    border-radius: 12px; padding: 10px 14px;
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; z-index: 6; box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+}
+.claim-banner-text { font-size: 13px; color: var(--text); }
+.claim-banner-text strong { color: var(--brand-green); display: block; margin-bottom: 1px; font-size: 13px; }
+.claim-banner-text span { color: var(--text-secondary); font-size: 12px; }
+.claim-banner-btn {
+    background: var(--brand-green); color: white; border: none;
+    padding: 7px 12px; border-radius: 8px; font-size: 13px; font-weight: 600;
+    cursor: pointer; white-space: nowrap;
+}
+.claim-banner-btn:hover { filter: brightness(1.05); }
+
+/* Claim picker modal */
+.modal-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.4);
+    z-index: 100; display: flex; align-items: center; justify-content: center;
+    padding: 16px;
+}
+.modal {
+    background: var(--surface); border-radius: 16px;
+    width: 100%; max-width: 480px; max-height: 80vh;
+    display: flex; flex-direction: column; overflow: hidden;
+}
+.modal-header { padding: 16px; border-bottom: 1px solid var(--separator); }
+.modal-title { font-size: 16px; font-weight: 700; color: var(--brand-green); }
+.modal-search {
+    width: 100%; margin-top: 10px; padding: 9px 12px;
+    border: 1px solid var(--separator); border-radius: 8px; font-size: 14px;
+    background: var(--bg);
+}
+.modal-search:focus { outline: none; border-color: var(--brand-green); }
+.modal-list { flex: 1; overflow-y: auto; padding: 4px 0; }
+.modal-item {
+    padding: 10px 16px; cursor: pointer; display: flex;
+    align-items: center; gap: 10px; font-size: 14px;
+    border-bottom: 1px solid var(--separator);
+}
+.modal-item:hover { background: var(--brand-soft); }
+.modal-item-avatar {
+    width: 32px; height: 32px; border-radius: 16px; background: var(--brand-soft);
+    color: var(--brand-green); font-weight: 700; font-size: 12px;
+    display: flex; align-items: center; justify-content: center;
+}
+.modal-item-name { font-weight: 600; }
+.modal-item-sub { color: var(--text-secondary); font-size: 12px; }
+.modal-footer {
+    padding: 10px 16px; display: flex; justify-content: flex-end; gap: 8px;
+    border-top: 1px solid var(--separator);
+}
+.modal-error { color: #b3261e; font-size: 12px; padding: 0 16px 8px; }
+.toast {
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+    background: var(--brand-green); color: white;
+    padding: 10px 18px; border-radius: 10px; font-size: 14px; font-weight: 500;
+    z-index: 200; box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+    animation: toast-in 0.18s ease-out;
+}
+@keyframes toast-in { from { opacity: 0; transform: translate(-50%, 8px); } to { opacity: 1; transform: translate(-50%, 0); } }
 </style>
 </head>
 <body>
@@ -161,6 +226,9 @@ import {
 import {
     getFirestore, doc, getDoc, collection, onSnapshot, query, where,
 } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
+import {
+    getFunctions, httpsCallable,
+} from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-functions.js';
 
 const firebaseConfig = {
     apiKey: "AIzaSyDAcRQU1XbVpyoyAG3aePz4mbcWlKiLeC0",
@@ -175,6 +243,7 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
+const functions = getFunctions(app);
 const googleProvider = new GoogleAuthProvider();
 
 const root = document.getElementById('root');
@@ -186,15 +255,21 @@ let state = {
     campName: '',
     people: [],
     relationships: [],
+    members: [],
+    roleByUid: {},
+    myRole: null,
     selectedId: null,
     scale: 1,
     panX: 0,
     panY: 0,
     userInteracted: false,
     hasAutoFit: false,
+    showClaimPicker: false,
+    claimSearch: '',
 };
 let unsubPeople = null;
 let unsubRels = null;
+let unsubMembers = null;
 let viewportSize = { w: 0, h: 0 };
 
 // ============================ UI: SIGN IN =============================
@@ -259,8 +334,11 @@ function renderChart() {
             <div class="chart-controls">
                 <button class="chart-btn" id="fit-btn" title="Fit to screen">⊕</button>
             </div>
+            <div id="claim-banner-slot"></div>
         </div>
         <div class="detail" id="detail"></div>
+        <div id="modal-slot"></div>
+        <div id="toast-slot"></div>
     `;
     document.getElementById('signout-btn').onclick = () => signOut(auth);
     document.getElementById('fit-btn').onclick = () => {
@@ -863,7 +941,9 @@ function drawChart() {
     // Cards
     for (const [id, pos] of layout.positions) {
         const p = byId.get(id); if (!p) continue;
-        drawCard(ctx, p, pos.x, pos.y, sel === id, labelMap.get(id));
+        const isMe = !!(state.user && p.linkedMemberUid && p.linkedMemberUid === state.user.uid);
+        const role = p.linkedMemberUid ? state.roleByUid[p.linkedMemberUid] || null : null;
+        drawCard(ctx, p, pos.x, pos.y, sel === id, labelMap.get(id), { isMe, role });
     }
     // Pet cards
     for (const att of layout.petAttachments) {
@@ -874,14 +954,16 @@ function drawChart() {
     ctx.restore();
 }
 
-function drawCard(ctx, p, x, y, highlighted, relationshipLabel) {
+function drawCard(ctx, p, x, y, highlighted, relationshipLabel, opts = {}) {
+    const isMe = !!opts.isMe;
+    const role = opts.role || null;
     ctx.save();
     const r = 10;
     roundRect(ctx, x, y, CARD_W, CARD_H, r);
-    ctx.fillStyle = highlighted ? '#E8F3EC' : '#FFFFFF';
+    ctx.fillStyle = (highlighted || isMe) ? '#E8F3EC' : '#FFFFFF';
     ctx.fill();
-    ctx.strokeStyle = highlighted ? '#408C61' : '#E0E5E1';
-    ctx.lineWidth = highlighted ? 2 : 0.5;
+    ctx.strokeStyle = (highlighted || isMe) ? '#408C61' : '#E0E5E1';
+    ctx.lineWidth = highlighted ? 2 : (isMe ? 1.5 : 0.5);
     ctx.stroke();
 
     // Avatar circle
@@ -901,9 +983,16 @@ function drawCard(ctx, p, x, y, highlighted, relationshipLabel) {
     ctx.textAlign = 'left';
     ctx.textBaseline = 'top';
     const tx = ax + avatarSize + 6, tw = CARD_W - (avatarSize + 18);
-    ctx.fillStyle = highlighted ? '#408C61' : '#1F2A24';
+    ctx.fillStyle = (highlighted || isMe) ? '#408C61' : '#1F2A24';
     ctx.font = 'bold 13px -apple-system';
-    ctx.fillText(truncate(displayName(p), 16), tx, y + 14);
+    const truncatedName = truncate(displayName(p), role ? 12 : 16);
+    ctx.fillText(truncatedName, tx, y + 14);
+
+    // Inline role chip after the name.
+    if (role) {
+        const nameWidth = ctx.measureText(truncatedName).width;
+        drawRoleChip(ctx, role, tx + nameWidth + 4, y + 13);
+    }
 
     ctx.font = '11px -apple-system';
     if (relationshipLabel) {
@@ -917,6 +1006,42 @@ function drawCard(ctx, p, x, y, highlighted, relationshipLabel) {
             ctx.fillText(yrs, tx, y + 32);
         }
     }
+
+    // "You" pill — top-right corner.
+    if (isMe) {
+        const youW = 24, youH = 12;
+        const pillX = x + CARD_W - youW - 4, pillY = y + 4;
+        roundRect(ctx, pillX, pillY, youW, youH, 6);
+        ctx.fillStyle = '#408C61'; ctx.fill();
+        ctx.fillStyle = '#FFFFFF';
+        ctx.font = 'bold 8px -apple-system';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText('YOU', pillX + youW / 2, pillY + youH / 2 + 0.5);
+    }
+    ctx.restore();
+}
+
+function drawRoleChip(ctx, role, x, y) {
+    const styles = {
+        leader:   { bg: '#408C61', fg: '#FFFFFF', label: 'LEADER',  border: '#408C61' },
+        camper:   { bg: '#E8F3EC', fg: '#408C61', label: 'CAMPER',  border: 'rgba(64,140,97,0.4)' },
+        visitor:  { bg: '#EFEFEF', fg: '#5C6B62', label: 'VISITOR', border: '#B8C2BB' },
+        cub:      { bg: '#EFEFEF', fg: '#5C6B62', label: 'CUB',     border: '#B8C2BB' },
+        visiting: { bg: '#EFEFEF', fg: '#5C6B62', label: 'VISITING',border: '#B8C2BB' },
+        guest:    { bg: '#EFEFEF', fg: '#5C6B62', label: 'GUEST',   border: '#B8C2BB' },
+    };
+    const s = styles[role] || styles.guest;
+    ctx.save();
+    ctx.font = 'bold 8px -apple-system';
+    const padX = 4, padY = 2;
+    const w = ctx.measureText(s.label).width + padX * 2;
+    const h = 10 + padY * 2;
+    roundRect(ctx, x, y - 1, w, h, h / 2);
+    ctx.fillStyle = s.bg; ctx.fill();
+    ctx.strokeStyle = s.border; ctx.lineWidth = 0.5; ctx.stroke();
+    ctx.fillStyle = s.fg;
+    ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.fillText(s.label, x + padX, y - 1 + h / 2 + 0.5);
     ctx.restore();
 }
 function drawPetCard(ctx, p, x, y) {
@@ -1036,6 +1161,7 @@ onAuthStateChanged(auth, async (user) => {
     if (!user) {
         if (unsubPeople) { unsubPeople(); unsubPeople = null; }
         if (unsubRels) { unsubRels(); unsubRels = null; }
+        if (unsubMembers) { unsubMembers(); unsubMembers = null; }
         renderSignIn();
         return;
     }
@@ -1057,6 +1183,7 @@ onAuthStateChanged(auth, async (user) => {
                 _layoutCache = null;
                 if (!document.getElementById('chart')) renderChart();
                 if (!state.userInteracted) fitToScreen();
+                refreshClaimBanner();
                 drawChart();
             },
             (err) => console.error('people listener error', err)
@@ -1071,6 +1198,18 @@ onAuthStateChanged(auth, async (user) => {
                 drawChart();
             },
             (err) => console.error('rel listener error', err)
+        );
+        unsubMembers = onSnapshot(
+            collection(db, `camps/${cid}/members`),
+            (snap) => {
+                state.members = snap.docs.map(d => ({ userId: d.id, ...d.data() }));
+                state.roleByUid = Object.fromEntries(state.members.map(m => [m.userId, m.role]));
+                state.myRole = state.roleByUid[user.uid] || null;
+                if (!document.getElementById('chart')) renderChart();
+                refreshClaimBanner();
+                drawChart();
+            },
+            (err) => console.error('members listener error', err)
         );
     } catch (e) {
         console.error('camp load failed', e);
@@ -1109,6 +1248,107 @@ function normalizeRel(d) {
         personAId: d.personAId,
         personBId: d.personBId,
     };
+}
+
+// =========================== CLAIM YOURSELF ===========================
+function refreshClaimBanner() {
+    const slot = document.getElementById('claim-banner-slot');
+    if (!slot) return;
+    if (!needsToClaim()) {
+        slot.innerHTML = '';
+        return;
+    }
+    slot.innerHTML = `
+        <div class="claim-banner">
+            <div class="claim-banner-text">
+                <strong>Welcome to the family tree</strong>
+                <span>Pick yourself from the tree to link your account.</span>
+            </div>
+            <button class="claim-banner-btn" id="claim-pick-btn">Pick yourself</button>
+        </div>
+    `;
+    document.getElementById('claim-pick-btn').onclick = openClaimPicker;
+}
+
+function needsToClaim() {
+    if (!state.user) return false;
+    if (!state.members.some(m => m.userId === state.user.uid)) return false;
+    return !state.people.some(p => p.linkedMemberUid === state.user.uid);
+}
+
+function openClaimPicker() {
+    state.claimSearch = '';
+    renderClaimPicker();
+}
+
+function renderClaimPicker(error = null) {
+    const slot = document.getElementById('modal-slot');
+    if (!slot) return;
+    const q = state.claimSearch.trim().toLowerCase();
+    const candidates = state.people
+        .filter(p => p.kind !== 'pet' && !p.linkedMemberUid)
+        .filter(p => !q || displayName(p).toLowerCase().includes(q))
+        .slice(0, 100);
+    slot.innerHTML = `
+        <div class="modal-overlay" id="claim-overlay">
+            <div class="modal" onclick="event.stopPropagation()">
+                <div class="modal-header">
+                    <div class="modal-title">Pick yourself from the tree</div>
+                    <input class="modal-search" id="claim-search-input" placeholder="Search by name…" value="${escapeHtml(state.claimSearch)}">
+                </div>
+                <div class="modal-list">
+                    ${candidates.length === 0
+                        ? `<div style="padding:24px;text-align:center;color:var(--text-secondary);font-size:13px">No unclaimed people match. Ask an admin to add you.</div>`
+                        : candidates.map(p => `
+                            <div class="modal-item" data-id="${p.id}">
+                                <div class="modal-item-avatar">${escapeHtml(initials(p.firstName, p.lastName))}</div>
+                                <div>
+                                    <div class="modal-item-name">${escapeHtml(displayName(p))}</div>
+                                    <div class="modal-item-sub">${escapeHtml(lifeYears(p) || '')}</div>
+                                </div>
+                            </div>
+                        `).join('')}
+                </div>
+                ${error ? `<div class="modal-error">${escapeHtml(error)}</div>` : ''}
+                <div class="modal-footer">
+                    <button class="btn-secondary" id="claim-cancel-btn">Cancel</button>
+                </div>
+            </div>
+        </div>
+    `;
+    document.getElementById('claim-overlay').onclick = closeClaimPicker;
+    document.getElementById('claim-cancel-btn').onclick = closeClaimPicker;
+    const inp = document.getElementById('claim-search-input');
+    inp.oninput = (e) => { state.claimSearch = e.target.value; renderClaimPicker(); };
+    inp.focus();
+    slot.querySelectorAll('.modal-item').forEach(el => {
+        el.onclick = () => submitClaim(el.dataset.id);
+    });
+}
+
+function closeClaimPicker() {
+    const slot = document.getElementById('modal-slot');
+    if (slot) slot.innerHTML = '';
+}
+
+async function submitClaim(personId) {
+    try {
+        const fn = httpsCallable(functions, 'linkVisitorToPerson');
+        await fn({ campId: state.campId, personId });
+        const p = state.people.find(x => x.id === personId);
+        closeClaimPicker();
+        showToast(`Linked to ${p ? displayName(p) : 'tree entry'}`);
+    } catch (e) {
+        console.error('linkVisitorToPerson failed', e);
+        renderClaimPicker(e.message || 'Failed to link.');
+    }
+}
+
+function showToast(msg) {
+    const slot = document.getElementById('toast-slot');
+    if (!slot) return;
+    slot.innerHTML = `<div class="toast">${escapeHtml(msg)}</div>`;
+    setTimeout(() => { if (slot) slot.innerHTML = ''; }, 2400);
 }
 
 function escapeHtml(s) {
