@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <meta name="theme-color" content="#A8D8F0">
 <title>Camp Bloom — Family</title>
 <style>
@@ -98,6 +98,7 @@ header {
 #chart {
     position: absolute; top: 0; left: 0;
     cursor: grab;
+    touch-action: none;
 }
 #chart:active { cursor: grabbing; }
 
@@ -485,6 +486,16 @@ function setupChartInteraction() {
         drawChart();
     }, { passive: false });
     canvas.addEventListener('gestureend', () => { gestureCenter = null; });
+
+    // iOS Safari: even with touch-action and viewport flags set, the page
+    // sometimes still receives the pinch as native zoom unless we explicitly
+    // preventDefault on multi-touch touchmove. Cheap insurance.
+    canvas.addEventListener('touchstart', (e) => {
+        if (e.touches.length >= 2) e.preventDefault();
+    }, { passive: false });
+    canvas.addEventListener('touchmove', (e) => {
+        if (e.touches.length >= 2) e.preventDefault();
+    }, { passive: false });
 
     window.addEventListener('resize', () => {
         sizeCanvas();
