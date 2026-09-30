@@ -237,6 +237,7 @@ header {
 <body>
 <div id="root"></div>
 
+<script src="kinship.js"></script>
 <script type="module">
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
 import {
@@ -285,6 +286,7 @@ let state = {
     hasAutoFit: false,
     showClaimPicker: false,
     claimSearch: '',
+    dataVersion: 0,
 };
 let unsubPeople = null;
 let unsubRels = null;
@@ -780,114 +782,27 @@ function assignGenerations(focus, comp, parentEdges, spouseEdges) {
     return gen;
 }
 
-// =================== RELATIONSHIPS (subset, blood + spouse) ===========
-function relationshipLabel(selectedId, person, people, relationships) {
+// =================== RELATIONSHIPS (kinship.js) ===========
+// Labels come from kinship.js, the reference implementation shared (by fixture
+// parity) with Kinship.kt / Kinship.swift. Cached per selection + data version.
+let kinCache = { key: null, labels: new Map() };
+function relationshipLabels(selectedId) {
+    if (!selectedId) return new Map();
+    const key = selectedId + '|' + state.people.length + '|' + state.relationships.length + '|' + state.dataVersion;
+    if (kinCache.key === key) return kinCache.labels;
+    const graph = window.Kinship.build(
+        state.people.map(p => ({ id: p.id, gender: p.gender || null, kind: p.kind || 'person' })),
+        state.relationships.filter(r => r.kind === 'parentChild').map(r => [r.parentId, r.childId]),
+        state.relationships.filter(r => r.kind === 'spouse').map(r => [r.personAId, r.personBId, !!r.endDate]),
+    );
+    const labels = new Map();
+    for (const [id, r] of window.Kinship.relativesOf(graph, selectedId)) labels.set(id, r.label);
+    kinCache = { key, labels };
+    return labels;
+}
+function relationshipLabel(selectedId, person) {
     if (!selectedId || person.id === selectedId) return null;
-    if (person.kind === 'pet') return null;
-    const byId = new Map(people.map(p => [p.id, p]));
-    const parentEdges = relationships.filter(r => r.kind === 'parentChild');
-    const spouseEdges = relationships.filter(r => r.kind === 'spouse');
-    const parentsOf = new Map();
-    for (const e of parentEdges) {
-        if (!parentsOf.has(e.childId)) parentsOf.set(e.childId, new Set());
-        parentsOf.get(e.childId).add(e.parentId);
-    }
-    const spousesOf = new Map();
-    for (const e of spouseEdges) {
-        if (!spousesOf.has(e.personAId)) spousesOf.set(e.personAId, new Set());
-        spousesOf.get(e.personAId).add(e.personBId);
-        if (!spousesOf.has(e.personBId)) spousesOf.set(e.personBId, new Set());
-        spousesOf.get(e.personBId).add(e.personAId);
-    }
-    function ancestors(id) {
-        const out = new Map([[id, 0]]); const queue = [id];
-        while (queue.length) {
-            const cur = queue.shift(); const d = out.get(cur);
-            for (const p of parentsOf.get(cur) || [])
-                if (!out.has(p)) { out.set(p, d + 1); queue.push(p); }
-        }
-        return out;
-    }
-    if ((spousesOf.get(selectedId) || new Set()).has(person.id))
-        return spouseLabel(person.gender);
-    const blood = bloodLabel(selectedId, person.id, byId, parentsOf, ancestors);
-    if (blood) return blood;
-    // In-laws (immediate only)
-    for (const partner of (spousesOf.get(person.id) || [])) {
-        if (partner === selectedId) continue;
-        const b = bloodLabel(selectedId, partner, byId, parentsOf, ancestors);
-        const il = inLawForm(b, person.gender);
-        if (il) return il;
-    }
-    for (const sp of (spousesOf.get(selectedId) || [])) {
-        if (sp === person.id) continue;
-        const b = bloodLabel(sp, person.id, byId, parentsOf, ancestors);
-        const il = inLawForm(b, person.gender);
-        if (il) return il;
-    }
-    return null;
-}
-function bloodLabel(sId, xId, byId, parentsOf, ancestors) {
-    const anS = ancestors(sId); const anX = ancestors(xId);
-    let bestSum = Infinity, bestDS = -1, bestDX = -1, sharedAt = 0;
-    for (const [a, dS] of anS) {
-        const dX = anX.get(a); if (dX == null) continue;
-        const sum = dS + dX;
-        if (sum < bestSum) { bestSum = sum; bestDS = dS; bestDX = dX; }
-    }
-    if (bestDS < 0) return null;
-    for (const [a, dS] of anS) {
-        if (dS === bestDS && anX.get(a) === bestDX) sharedAt++;
-    }
-    const isHalf = sharedAt < 2;
-    const xG = byId.get(xId)?.gender;
-    if (bestDS === 0 && bestDX > 0) return descendantLabel(bestDX, xG);
-    if (bestDS > 0 && bestDX === 0) return ancestorLabel(bestDS, xG);
-    if (bestDS === 1 && bestDX === 1)
-        return isHalf ? halfSiblingLabel(xG) : siblingLabel(xG);
-    if (bestDS === 1 && bestDX > 1) return nieceNephewLabel(bestDX - 1, xG, isHalf);
-    if (bestDX === 1 && bestDS > 1) return auntUncleLabel(bestDS - 1, xG, isHalf);
-    if (bestDS >= 2 && bestDX >= 2)
-        return cousinLabel(Math.min(bestDS, bestDX) - 1, Math.abs(bestDS - bestDX), isHalf);
-    return null;
-}
-function spouseLabel(g) { return g === 'female' ? 'Wife' : g === 'male' ? 'Husband' : 'Spouse'; }
-function ancestorLabel(d, g) {
-    const greats = 'Great-'.repeat(Math.max(0, d - 2));
-    if (g === 'female') return d===1?'Mother':d===2?'Grandmother':`${greats}Grandmother`;
-    if (g === 'male') return d===1?'Father':d===2?'Grandfather':`${greats}Grandfather`;
-    return d===1?'Parent':d===2?'Grandparent':`${greats}Grandparent`;
-}
-function descendantLabel(d, g) {
-    const greats = 'Great-'.repeat(Math.max(0, d - 2));
-    if (g === 'female') return d===1?'Daughter':d===2?'Granddaughter':`${greats}Granddaughter`;
-    if (g === 'male') return d===1?'Son':d===2?'Grandson':`${greats}Grandson`;
-    return d===1?'Child':d===2?'Grandchild':`${greats}Grandchild`;
-}
-function siblingLabel(g) { return g === 'female' ? 'Sister' : g === 'male' ? 'Brother' : 'Sibling'; }
-function halfSiblingLabel(g) { return g === 'female' ? 'Half-sister' : g === 'male' ? 'Half-brother' : 'Half-sibling'; }
-function nieceNephewLabel(d, g, half) {
-    const greats = 'Great-'.repeat(Math.max(0, d - 2));
-    let core;
-    if (g === 'female') core = d===1?'Niece':d===2?'Grand-niece':`${greats}Grand-niece`;
-    else if (g === 'male') core = d===1?'Nephew':d===2?'Grand-nephew':`${greats}Grand-nephew`;
-    else core = d===1?'Niece or nephew':d===2?'Grand-niece or nephew':`${greats}Grand-niece or nephew`;
-    return half ? `Half-${core[0].toLowerCase()}${core.slice(1)}` : core;
-}
-function auntUncleLabel(d, g, half) {
-    const greats = 'Great-'.repeat(Math.max(0, d - 2));
-    let core;
-    if (g === 'female') core = d===1?'Aunt':d===2?'Grand-aunt':`${greats}Grand-aunt`;
-    else if (g === 'male') core = d===1?'Uncle':d===2?'Grand-uncle':`${greats}Grand-uncle`;
-    else core = d===1?'Aunt or uncle':d===2?'Grand-aunt or uncle':`${greats}Grand-aunt or uncle`;
-    return half ? `Half-${core[0].toLowerCase()}${core.slice(1)}` : core;
-}
-function cousinLabel(level, removed, half) {
-    const ord = ordinal(level);
-    const rem = removed === 0 ? '' : removed === 1 ? ' once removed'
-        : removed === 2 ? ' twice removed' : removed === 3 ? ' three times removed'
-        : ` ${removed} times removed`;
-    return `${half ? 'Half-' : ''}${ord} cousin${rem}`;
+    return relationshipLabels(selectedId).get(person.id) || null;
 }
 function ordinal(n) {
     const m = n % 100;
@@ -931,13 +846,7 @@ function drawChart() {
 
     const byId = new Map(state.people.map(p => [p.id, p]));
     const sel = state.selectedId;
-    const labelMap = new Map();
-    if (sel) {
-        for (const p of state.people) {
-            const l = relationshipLabel(sel, p, state.people, state.relationships);
-            if (l) labelMap.set(p.id, l);
-        }
-    }
+    const labelMap = relationshipLabels(sel);
 
     ctx.save();
     ctx.translate(state.panX, state.panY);
@@ -1170,7 +1079,7 @@ function closeDetail() {
 function showDetail(id) {
     const p = state.people.find(x => x.id === id);
     if (!p) return;
-    const rel = relationshipLabel(state.selectedId === id ? null : state.selectedId, p, state.people, state.relationships);
+    const rel = relationshipLabel(state.selectedId === id ? null : state.selectedId, p);
     const detail = document.getElementById('detail');
     detail.innerHTML = `
         <button class="detail-close" id="detail-close">×</button>
@@ -1220,6 +1129,7 @@ onAuthStateChanged(auth, async (user) => {
             collection(db, `camps/${cid}/people`),
             (snap) => {
                 state.people = snap.docs.map(d => ({ id: d.id, ...normalizePerson(d.data()) }));
+                state.dataVersion++;
                 _layoutCache = null;
                 if (!document.getElementById('chart')) renderChart();
                 if (!state.userInteracted) fitToScreen();
@@ -1232,6 +1142,7 @@ onAuthStateChanged(auth, async (user) => {
             collection(db, `camps/${cid}/relationships`),
             (snap) => {
                 state.relationships = snap.docs.map(d => ({ id: d.id, ...normalizeRel(d.data()) }));
+                state.dataVersion++;
                 _layoutCache = null;
                 if (!document.getElementById('chart')) renderChart();
                 if (!state.userInteracted) fitToScreen();
@@ -1287,6 +1198,7 @@ function normalizeRel(d) {
         childId: d.childId,
         personAId: d.personAId,
         personBId: d.personBId,
+        endDate: d.endDate || null,
     };
 }
 
@@ -1360,7 +1272,7 @@ function renderClaimPicker(error = null) {
                     ${candidates.length === 0
                         ? `<div style="padding:24px;text-align:center;color:var(--text-secondary);font-size:13px">No unclaimed people match. Ask an admin to add you.</div>`
                         : candidates.map(p => `
-                            <div class="modal-item" data-id="${p.id}">
+                            <div class="modal-item" data-id="${escapeHtml(p.id)}">
                                 <div class="modal-item-avatar">${escapeHtml(initials(p.firstName, p.lastName))}</div>
                                 <div>
                                     <div class="modal-item-name">${escapeHtml(displayName(p))}</div>
