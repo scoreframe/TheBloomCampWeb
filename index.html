@@ -953,22 +953,39 @@ function drawCard(ctx, p, x, y, highlighted, relationshipLabel, opts = {}) {
 
     ctx.textAlign = 'left';
     ctx.textBaseline = 'top';
-    const tx = ax + avatarSize + 6, tw = CARD_W - (avatarSize + 18);
-    ctx.fillStyle = (highlighted || isMe) ? '#408C61' : '#1F2A24';
-    ctx.font = 'bold 13px -apple-system';
-    ctx.fillText(truncate(displayName(p), 16), tx, y + 14);
+    const tx = ax + avatarSize + 6, tw = CARD_W - (avatarSize + 14);
 
-    ctx.font = '11px -apple-system';
-    if (relationshipLabel) {
-        ctx.fillStyle = '#E07A1F';
-        ctx.font = 'italic bold 11px -apple-system';
-        ctx.fillText(truncate(relationshipLabel, 18), tx, y + 32);
+    // Name: one line when it fits, else first name / last name on their own lines.
+    const NAME_FONT = 'bold 12.5px -apple-system', NAME_LH = 15;
+    ctx.font = NAME_FONT;
+    const full = displayName(p) || 'Unnamed';
+    const given = [p.preferredName || p.firstName, p.middleName && !p.preferredName ? p.middleName : null]
+        .filter(Boolean).join(' ');
+    let nameLines;
+    if (ctx.measureText(full).width <= tw || !p.lastName || !given) {
+        nameLines = wrapText(ctx, full, tw, 2);
     } else {
-        const yrs = lifeYears(p);
-        if (yrs) {
-            ctx.fillStyle = '#5C6B62';
-            ctx.fillText(yrs, tx, y + 32);
-        }
+        nameLines = [...wrapText(ctx, given, tw, 1), ...wrapText(ctx, p.lastName, tw, 1)];
+    }
+
+    // Second block: relationship (up to 2 lines) or life years.
+    const SUB_LH = 13;
+    const subFont = relationshipLabel ? 'bold 11px -apple-system' : '11px -apple-system';
+    ctx.font = subFont;
+    const subText = relationshipLabel || lifeYears(p) || '';
+    const subMax = nameLines.length >= 2 ? 1 : 2;
+    const subLines = subText ? wrapText(ctx, subText, tw, subMax) : [];
+
+    const blockH = nameLines.length * NAME_LH + (subLines.length ? 3 + subLines.length * SUB_LH : 0);
+    let ty = y + Math.max(5, (CARD_H - blockH) / 2);
+    ctx.font = NAME_FONT;
+    ctx.fillStyle = (highlighted || isMe) ? '#408C61' : '#1F2A24';
+    for (const line of nameLines) { ctx.fillText(line, tx, ty); ty += NAME_LH; }
+    if (subLines.length) {
+        ty += 3;
+        ctx.font = subFont;
+        ctx.fillStyle = relationshipLabel ? '#C4621A' : '#5C6B62';
+        for (const line of subLines) { ctx.fillText(line, tx, ty); ty += SUB_LH; }
     }
 
     // "You" pill — top-right corner.
@@ -988,6 +1005,36 @@ function drawCard(ctx, p, x, y, highlighted, relationshipLabel, opts = {}) {
         drawRoleChip(ctx, role, x + CARD_W - 16, y + CARD_H - 14);
     }
     ctx.restore();
+}
+
+// Greedy word wrap by measured width; the last allowed line gets an ellipsis if
+// text remains, and a single word wider than the box is cut with an ellipsis.
+function wrapText(ctx, text, maxWidth, maxLines) {
+    const words = String(text).split(/\s+/).filter(Boolean);
+    const lines = [];
+    let cur = '';
+    const fit = (str) => {
+        if (ctx.measureText(str).width <= maxWidth) return str;
+        let t = str;
+        while (t.length > 1 && ctx.measureText(t + '…').width > maxWidth) t = t.slice(0, -1);
+        return t + '…';
+    };
+    for (let i = 0; i < words.length; i++) {
+        const next = cur ? cur + ' ' + words[i] : words[i];
+        if (ctx.measureText(next).width <= maxWidth) { cur = next; continue; }
+        if (lines.length === maxLines - 1) {
+            lines.push(fit([cur, ...words.slice(i)].filter(Boolean).join(' ')));
+            return lines;
+        }
+        if (cur) lines.push(cur);
+        cur = words[i];
+        if (ctx.measureText(cur).width > maxWidth) {
+            if (lines.length === maxLines - 1) { lines.push(fit(words.slice(i).join(' '))); return lines; }
+            lines.push(fit(cur)); cur = '';
+        }
+    }
+    if (cur) lines.push(lines.length === maxLines - 1 ? fit(cur) : cur);
+    return lines.slice(0, maxLines);
 }
 
 function drawRoleChip(ctx, role, x, y) {
