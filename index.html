@@ -157,6 +157,7 @@ header {
     color: var(--selected-edge); font-style: italic; font-weight: 600;
     font-size: 13px; margin-top: 2px;
 }
+.detail-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
 .detail-section { margin-top: 10px; font-size: 14px; line-height: 1.5; }
 .detail-section .label {
     text-transform: uppercase; font-size: 11px; color: var(--text-secondary);
@@ -287,6 +288,7 @@ let state = {
     showClaimPicker: false,
     claimSearch: '',
     dataVersion: 0,
+    viewpointId: null,
 };
 let unsubPeople = null;
 let unsubRels = null;
@@ -800,6 +802,19 @@ function relationshipLabels(selectedId) {
     kinCache = { key, labels };
     return labels;
 }
+// The person everyone is related to: an explicit "View as" choice, else the
+// signed-in member's own Person, else (unlinked) whoever is selected.
+function myPersonId() {
+    if (!state.user) return null;
+    const me = state.people.find(p => p.linkedMemberUid === state.user.uid && p.kind !== 'pet');
+    return me ? me.id : null;
+}
+function viewpointId() {
+    const v = state.viewpointId;
+    if (v && state.people.some(p => p.id === v)) return v;
+    return myPersonId() || state.selectedId;
+}
+function firstName(p) { return (p.preferredName || p.firstName || displayName(p) || '').trim(); }
 function relationshipLabel(selectedId, person) {
     if (!selectedId || person.id === selectedId) return null;
     return relationshipLabels(selectedId).get(person.id) || null;
@@ -846,7 +861,10 @@ function drawChart() {
 
     const byId = new Map(state.people.map(p => [p.id, p]));
     const sel = state.selectedId;
-    const labelMap = relationshipLabels(sel);
+    const ref = viewpointId();
+    const me = myPersonId();
+    const labelMap = new Map(relationshipLabels(ref));
+    if (ref) labelMap.set(ref, ref === me ? 'You' : 'Viewpoint');
 
     ctx.save();
     ctx.translate(state.panX, state.panY);
@@ -1079,7 +1097,22 @@ function closeDetail() {
 function showDetail(id) {
     const p = state.people.find(x => x.id === id);
     if (!p) return;
-    const rel = relationshipLabel(state.selectedId === id ? null : state.selectedId, p);
+    const ref = viewpointId();
+    const me = myPersonId();
+    const refP = state.people.find(x => x.id === ref);
+    const viewingOther = !!(ref && ref !== me);
+    let rel = null;
+    if (ref && ref !== id) {
+        const l = relationshipLabel(ref, p);
+        rel = l ? (ref === me ? 'Your ' : firstName(refP) + "'s ") + l.charAt(0).toLowerCase() + l.slice(1)
+                : 'Not connected to ' + (ref === me ? 'you' : firstName(refP)) + ' yet';
+    } else if (ref === id) {
+        rel = id === me ? 'That\'s you' : 'Everyone is shown relative to ' + firstName(p);
+    }
+    const toYou = viewingOther && me && me !== id ? relationshipLabel(me, p) : null;
+    const actions = [];
+    if (ref && ref !== id) actions.push(`<button class="btn btn-primary" id="detail-viewas">View as ${escapeHtml(id === me ? 'me' : firstName(p))}</button>`);
+    if (viewingOther && me) actions.push(`<button class="btn" id="detail-backtome">Back to me</button>`);
     const detail = document.getElementById('detail');
     detail.innerHTML = `
         <button class="detail-close" id="detail-close">×</button>
@@ -1093,14 +1126,20 @@ function showDetail(id) {
                 <div class="detail-name">${p.kind === 'pet' ? '🐾 ' : ''}${escapeHtml(displayName(p))}</div>
                 <div class="detail-years">${escapeHtml(lifeYears(p) || '')}</div>
                 ${rel ? `<div class="detail-relationship">${escapeHtml(rel)}</div>` : ''}
+                ${toYou ? `<div class="detail-years">To you: ${escapeHtml(toYou.charAt(0).toLowerCase() + toYou.slice(1))}</div>` : (viewingOther && id === me ? `<div class="detail-years">That's you</div>` : '')}
             </div>
         </div>
+        ${actions.length ? `<div class="detail-actions">${actions.join('')}</div>` : ''}
         ${p.birthPlace ? `<div class="detail-section"><div class="label">Born in</div>${escapeHtml(p.birthPlace)}</div>` : ''}
         ${p.deathPlace ? `<div class="detail-section"><div class="label">Died in</div>${escapeHtml(p.deathPlace)}</div>` : ''}
         ${p.occupation ? `<div class="detail-section"><div class="label">Occupation</div>${escapeHtml(p.occupation)}</div>` : ''}
         ${p.stories ? `<div class="detail-section"><div class="label">Stories</div>${escapeHtml(p.stories)}</div>` : ''}
     `;
     document.getElementById('detail-close').onclick = closeDetail;
+    const va = document.getElementById('detail-viewas');
+    if (va) va.onclick = () => { state.viewpointId = id === me ? null : id; drawChart(); showDetail(id); };
+    const back = document.getElementById('detail-backtome');
+    if (back) back.onclick = () => { state.viewpointId = null; drawChart(); showDetail(id); };
     detail.classList.add('open');
 }
 
